@@ -1,32 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-network_summary_analysis.py
-
-Batch summary analysis for bee point-cloud trials:
-- Build epsilon graph for each frame
-- Compute gcc_ratio and edge_density time series
-- Extract per-trial summary metrics
-- Compare groups (20/30/40 bees) with Kruskal-Wallis
-- Save boxplots and one example time-series plot per group
-
-Expected input structure:
-data/
-    20/
-        trial1.npy
-        trial2.npy
-        ...
-    30/
-        ...
-    40/
-        ...
-
-Each .npy file shape: (T, N, 2)
+Batch network-summary analysis for bee point-cloud trials.
 """
 
 import glob
 import json
 import os
-from itertools import combinations
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -34,37 +13,24 @@ from matplotlib.colors import to_rgba
 import networkx as nx
 import numpy as np
 import pandas as pd
-from scipy import stats
 from scipy.spatial.distance import pdist, squareform
 
-# Single-figure size with 10:8 aspect ratio.
 SINGLE_FIGSIZE = (10.0, 8.0)
 
-# Reference palette from the provided figure.
-COLOR_MAGENTA = "#AD1A60"
-COLOR_PINK = "#D15682"
-COLOR_LIGHT_PINK = "#FBCDDC"
-COLOR_LIGHT_BLUE = "#C8CDF5"
-COLOR_BLUE = "#9BBAF9"
-COLOR_DEEP_BLUE = "#4260CF"
-PANEL_BG = "#F7F4F8"
-AXIS_GREY = "#D9D9D9"
 GROUP_COLORS = ["#E6A15B", "#4D5FB3", "#D74B45", "#4EA28D", "#8BCB67"]
 TIME_SERIES_BLUE = "#4D5FB3"
 TIME_SERIES_RED = "#D74B45"
 
 
-# =========================
-# 1. Graph utilities
-# =========================
 def build_epsilon_graph(points: np.ndarray, epsilon: float) -> nx.Graph:
-    """Build epsilon graph from one point cloud frame (N, 2)."""
+    """Build an epsilon graph for one frame."""
     n = points.shape[0]
     dmat = squareform(pdist(points))
 
     graph = nx.Graph()
     graph.add_nodes_from(range(n))
 
+    # Connect points whose distance is at most epsilon.
     for i in range(n):
         for j in range(i + 1, n):
             if dmat[i, j] <= epsilon:
@@ -73,7 +39,7 @@ def build_epsilon_graph(points: np.ndarray, epsilon: float) -> nx.Graph:
 
 
 def gcc_ratio(graph: nx.Graph) -> float:
-    """Largest connected component ratio."""
+    """Return the ratio of nodes in the largest connected component."""
     if graph.number_of_nodes() == 0:
         return 0.0
     comps = list(nx.connected_components(graph))
@@ -83,26 +49,21 @@ def gcc_ratio(graph: nx.Graph) -> float:
 
 
 def edge_density(graph: nx.Graph) -> float:
-    """Undirected edge density."""
+    """Return undirected edge density."""
     n = graph.number_of_nodes()
     if n <= 1:
         return 0.0
     return 2 * graph.number_of_edges() / (n * (n - 1))
 
 
-# =========================
-# 2. Per-trial time series
-# =========================
 def analyze_one_trial(pcs: np.ndarray, epsilon: float, down_t: int = 1) -> pd.DataFrame:
-    """
-    Analyze one trial point-cloud sequence.
-    pcs shape: (T, N, 2)
-    Returns columns: frame, gcc_ratio, edge_density, num_nodes, num_edges
-    """
+    """Compute frame-wise network metrics for one trial."""
     _, _, dim = pcs.shape
     assert dim == 2, f"Expected points shape (T, N, 2), got {pcs.shape}"
 
     rows = []
+
+    # Build one epsilon graph per sampled frame.
     for t in range(0, pcs.shape[0], down_t):
         graph = build_epsilon_graph(pcs[t], epsilon)
         rows.append(
@@ -117,25 +78,22 @@ def analyze_one_trial(pcs: np.ndarray, epsilon: float, down_t: int = 1) -> pd.Da
     return pd.DataFrame(rows)
 
 
-# =========================
-# 3. Summary extraction
-# =========================
 def safe_peak(values: np.ndarray) -> float:
-    """Safe max with nan handling."""
+    """Return a NaN-safe peak value."""
     if len(values) == 0 or np.all(np.isnan(values)):
         return np.nan
     return float(np.nanmax(values))
 
 
 def high_duration(values: np.ndarray, threshold: float, frame_step: float = 1.0) -> float:
-    """Total duration where values >= threshold."""
+    """Return total time spent above a threshold."""
     if len(values) == 0:
         return np.nan
     return float(np.sum(values >= threshold) * frame_step)
 
 
 def normalized_auc(values: np.ndarray, frames: np.ndarray) -> float:
-    """Area under curve normalized by total trial time."""
+    """Return AUC normalized by the total trial duration."""
     if len(values) < 2:
         return np.nan
     total_time = frames[-1] - frames[0]
@@ -153,26 +111,13 @@ def extract_trial_summary(
     density_absolute_thr: Optional[float] = None,
     down_t: int = 1,
 ) -> Dict[str, float]:
-    """
-    Extract summary metrics from one trial.
-
-    Kept metrics:
-    1) Aggregation intensity:
-       - gcc_peak
-       - density_peak
-    2) Aggregation stability:
-       - gcc_high_duration
-       - density_high_duration
-       - gcc_auc_norm
-       - density_auc_norm
-    """
+    """Extract trial-level summary metrics from one time series."""
     frames = df_trial["frame"].to_numpy(dtype=float)
     gcc_vals = df_trial["gcc_ratio"].to_numpy(dtype=float)
     density_vals = df_trial["edge_density"].to_numpy(dtype=float)
 
     gcc_peak_val = safe_peak(gcc_vals)
     density_peak_val = safe_peak(density_vals)
-
     gcc_high_dur = high_duration(gcc_vals, threshold=gcc_high_thr, frame_step=down_t)
 
     if density_high_thr_mode == "relative":
@@ -180,6 +125,7 @@ def extract_trial_summary(
             density_thr = np.nan
             density_high_dur = np.nan
         else:
+            # Define the density threshold relative to the within-trial peak.
             density_thr = density_relative_ratio * density_peak_val
             density_high_dur = high_duration(density_vals, threshold=density_thr, frame_step=down_t)
     elif density_high_thr_mode == "absolute":
@@ -190,6 +136,7 @@ def extract_trial_summary(
     else:
         raise ValueError("density_high_thr_mode must be 'relative' or 'absolute'")
 
+    # Normalized AUC acts as an average level over time.
     gcc_auc = normalized_auc(gcc_vals, frames)
     density_auc = normalized_auc(density_vals, frames)
 
@@ -208,102 +155,13 @@ def extract_trial_summary(
     }
 
 
-# =========================
-# 4. Statistics utilities
-# =========================
-def one_way_test(groups: Dict[int, List[float]]) -> Dict[str, float]:
-    """Kruskal-Wallis across bee-count groups."""
-    data = []
-    for _, vals in groups.items():
-        clean = [v for v in vals if not np.isnan(v)]
-        if clean:
-            data.append(clean)
-
-    if len(data) < 2:
-        return {"statistic": np.nan, "p_value": np.nan}
-
-    stat, p = stats.kruskal(*data)
-    return {"statistic": float(stat), "p_value": float(p)}
-
-
-def pairwise_tests_holm(groups: Dict[int, List[float]]) -> List[Dict[str, float]]:
-    """
-    Pairwise Mann-Whitney U tests with Holm correction.
-    Returns one row per pair with raw and corrected p-values.
-    """
-    keys = sorted(groups.keys())
-    raw_rows = []
-    for g1, g2 in combinations(keys, 2):
-        x = [v for v in groups[g1] if not np.isnan(v)]
-        y = [v for v in groups[g2] if not np.isnan(v)]
-        if len(x) == 0 or len(y) == 0:
-            raw_rows.append({"group1": g1, "group2": g2, "statistic": np.nan, "p_raw": np.nan})
-            continue
-        stat, p = stats.mannwhitneyu(x, y, alternative="two-sided")
-        raw_rows.append({"group1": g1, "group2": g2, "statistic": float(stat), "p_raw": float(p)})
-
-    valid = [(i, r["p_raw"]) for i, r in enumerate(raw_rows) if not np.isnan(r["p_raw"])]
-    m = len(valid)
-    if m == 0:
-        for r in raw_rows:
-            r["p_holm"] = np.nan
-        return raw_rows
-
-    valid_sorted = sorted(valid, key=lambda t: t[1])
-    adjusted_sorted = []
-    for rank, (_, p) in enumerate(valid_sorted, start=1):
-        adjusted_sorted.append((m - rank + 1) * p)
-    # Enforce monotonicity.
-    for i in range(1, len(adjusted_sorted)):
-        adjusted_sorted[i] = max(adjusted_sorted[i], adjusted_sorted[i - 1])
-    adjusted_sorted = [min(1.0, v) for v in adjusted_sorted]
-
-    idx_to_adj = {}
-    for (idx, _), adj in zip(valid_sorted, adjusted_sorted):
-        idx_to_adj[idx] = adj
-    for i, r in enumerate(raw_rows):
-        r["p_holm"] = float(idx_to_adj[i]) if i in idx_to_adj else np.nan
-
-    return raw_rows
-
-
-# =========================
-# 5. Plot functions
-# =========================
-def p_to_stars(p_value: float) -> str:
-    if np.isnan(p_value):
-        return "ns"
-    if p_value < 0.001:
-        return "***"
-    if p_value < 0.01:
-        return "**"
-    if p_value < 0.05:
-        return "*"
-    return "ns"
-
-
-def add_significance_bar(ax, x1: float, x2: float, y: float, h: float, text: str):
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.8, c=COLOR_PINK, clip_on=False)
-    dy = 0.01 * (ax.get_ylim()[1] - ax.get_ylim()[0])
-    ax.text(
-        (x1 + x2) / 2,
-        y + h + dy,
-        text,
-        ha="center",
-        va="bottom",
-        fontsize=14,
-        fontweight="bold",
-        color=COLOR_MAGENTA,
-    )
-
-
 def draw_boxplot_on_ax(
     ax,
     data_dict: Dict[int, List[float]],
     ylabel: str,
     title: str,
 ):
-    """Draw publication-style colored boxplot with overlaid points."""
+    """Draw a colored boxplot with overlaid sample points."""
     keys = sorted(data_dict.keys())
     data = [[v for v in data_dict[k] if not np.isnan(v)] for k in keys]
     box_colors = GROUP_COLORS[: len(keys)]
@@ -336,6 +194,7 @@ def draw_boxplot_on_ax(
     for median, color in zip(bp["medians"], box_colors):
         median.set_color(color)
 
+    # Overlay jittered points to show individual trials.
     rng = np.random.default_rng(0)
     for i, (vals, color) in enumerate(zip(data, box_colors), start=1):
         if len(vals) == 0:
@@ -370,7 +229,7 @@ def plot_boxplot(
     title: str,
     save_path: str,
 ):
-    """Draw styled boxplot + points."""
+    """Create and save a boxplot figure."""
     fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE, dpi=300)
     fig.patch.set_facecolor("white")
     draw_boxplot_on_ax(
@@ -385,11 +244,14 @@ def plot_boxplot(
 
 
 def draw_example_time_series_on_ax(ax, df_trial: pd.DataFrame, trial_title: str):
+    """Draw GCC ratio and edge density on twin y-axes."""
     frames = df_trial["frame"].to_numpy()
     gcc_vals = df_trial["gcc_ratio"].to_numpy()
     density_vals = df_trial["edge_density"].to_numpy()
 
     ax.set_facecolor("white")
+
+    # Left axis: GCC ratio.
     line1 = ax.plot(frames, gcc_vals, label="GCC ratio", linewidth=1.8, color=TIME_SERIES_BLUE)[0]
     ax.set_xlabel("Time (s)", fontsize=11)
     ax.set_ylabel("GCC ratio", fontsize=11, color=TIME_SERIES_BLUE)
@@ -399,6 +261,7 @@ def draw_example_time_series_on_ax(ax, df_trial: pd.DataFrame, trial_title: str)
     ax.grid(False)
     ax.set_title(trial_title, fontsize=12, color=TIME_SERIES_RED)
 
+    # Right axis: edge density.
     ax2 = ax.twinx()
     line2 = ax2.plot(frames, density_vals, label="Edge density", linewidth=1.8, color=TIME_SERIES_RED)[0]
     ax2.set_ylim(-0.05, 0.55)
@@ -431,7 +294,7 @@ def draw_example_time_series_on_ax(ax, df_trial: pd.DataFrame, trial_title: str)
 
 
 def plot_example_time_series(df_trial: pd.DataFrame, trial_title: str, save_path: str):
-    """Optional: plot one example trial time series per group."""
+    """Create and save one example time-series figure."""
     fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE, dpi=300)
     fig.patch.set_facecolor("white")
     draw_example_time_series_on_ax(ax, df_trial=df_trial, trial_title=trial_title)
@@ -440,9 +303,6 @@ def plot_example_time_series(df_trial: pd.DataFrame, trial_title: str, save_path
     plt.close()
 
 
-# =========================
-# 6. Main workflow
-# =========================
 def main():
     data_root = r"./data"
     out_root = r"./network_summary_results_2"
@@ -452,7 +312,7 @@ def main():
     down_t = 1
 
     gcc_high_thr = 0.8
-    density_high_thr_mode = "relative"  # "relative" or "absolute"
+    density_high_thr_mode = "relative"
     density_relative_ratio = 0.8
     density_absolute_thr = None
 
@@ -460,6 +320,7 @@ def main():
     os.makedirs(os.path.join(out_root, "trial_level"), exist_ok=True)
     os.makedirs(os.path.join(out_root, "figures"), exist_ok=True)
 
+    # Save the analysis configuration for reproducibility.
     config = {
         "data_root": data_root,
         "bee_groups": bee_groups,
@@ -475,8 +336,6 @@ def main():
 
     summary_rows = []
     example_plot_done = set()
-    example_trial_dfs: Dict[int, pd.DataFrame] = {}
-    example_trial_files: Dict[int, str] = {}
     figure_sources = []
 
     for bee_n in bee_groups:
@@ -500,12 +359,12 @@ def main():
             df_trial["trial_id"] = trial_idx
             df_trial["trial_file"] = os.path.basename(trial_file)
 
+            # Save frame-level metrics for this trial.
             base_name = os.path.splitext(os.path.basename(trial_file))[0]
             df_trial.to_csv(os.path.join(trial_out_dir, f"{base_name}_timeseries.csv"), index=False)
 
+            # Save one example time-series figure per group.
             if bee_n not in example_plot_done:
-                example_trial_dfs[bee_n] = df_trial[["frame", "gcc_ratio", "edge_density"]].copy()
-                example_trial_files[bee_n] = os.path.basename(trial_file)
                 fig_name = f"{bee_n}_bees_example_timeseries.svg"
                 plot_example_time_series(
                     df_trial=df_trial,
@@ -539,15 +398,6 @@ def main():
     df_summary = pd.DataFrame(summary_rows)
     df_summary.to_csv(os.path.join(out_root, "trial_summary_metrics.csv"), index=False)
 
-    target_metrics = [
-        "gcc_peak",
-        "density_peak",
-        "gcc_high_duration",
-        "density_high_duration",
-        "gcc_auc_norm",
-        "density_auc_norm",
-    ]
-
     figure_metric_map = {
         "gcc_peak": "GCC peak",
         "density_peak": "Edge density peak",
@@ -558,6 +408,7 @@ def main():
     }
 
     for metric, ylabel in figure_metric_map.items():
+        # Collect one value list per bee-count group.
         group_dict = {
             bee_n: df_summary.loc[df_summary["bee_count"] == bee_n, metric].tolist() for bee_n in bee_groups
         }
